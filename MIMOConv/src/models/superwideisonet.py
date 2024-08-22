@@ -14,6 +14,7 @@ from typing import List
 from models.superwideresnet import SuperWideResnet, BasicBlock
 from superposition import noOrthoRegularization
 from typing import Optional
+from codebook_output import CodebookOutput
 
 # ==================================================================================================
 # FUNCTIONS
@@ -235,3 +236,67 @@ class SuperWideISONet(SuperWideResnet):
                 sum += torch.mean((mod.weight - average)**2)
                 count += 1
         return 0 if count == 0 else sum.item() / count
+
+class ModifiedAdjustedISOBloc(AdjustedISOBlock):
+    def forward(self, x: Tensor) -> Tensor:
+        if type(x) == CodebookOutput:
+            return x.map(super().forward)
+        else:
+            return super().forward(x)
+
+class ModifiedSuperWideISONet(SuperWideISONet):
+    def backend(self, x):
+        x = self.avgpool(x) #(N/num_img_sup, C, 1, 1)
+
+        #(N/num_img_sup, C, H, W)
+        x = self.unbind(x) #(N/num_img_sup, num_img_sup_cap * C, 1, 1)
+
+        x = x.reshape(self.eff_batch_size // self.num_img_sup, self.sup_ratio, self.num_img_sup, self.fc.in_features) #(N/num_img_sup, sup_ratio, num_img_sup , C)
+        x = x.mean(dim=1) #(N/num_img_sup, num_img_sup, C) 
+                
+        x = x.reshape(self.eff_batch_size, self.fc.in_features) #(N, C) 
+
+        # fully connected layer (linear)
+        x = self.fc(x)
+
+        return x
+    
+    def forward(self, x: Tensor) -> Tensor:
+        r"""
+        Args:
+            x: tensor of size (N, C, H, W)
+        Returns:
+            a tensor of size (N, number_of_classes)
+        """
+        assert self.num_img_sup_cap % self.num_img_sup == 0, 'all superposition channels must be used, i.e. the number of superpositions must divide the superposition capacity of the model'
+        self.sup_ratio = self.num_img_sup_cap // self.num_img_sup
+        
+        self.eff_batch_size = x.shape[0] - (x.shape[0] % self.num_img_sup)
+        x = x[:self.eff_batch_size, :, :, :] # now batch is divisible by self.num_img_sup
+
+        # Normal WideResNet implementation enabled for processing images in superposition
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+
+        # Bundling operation after binding images with keys
+        assert x.shape[0] % self.num_img_sup == 0
+        x = x.reshape(x.shape[0]//self.num_img_sup, self.num_img_sup, x.shape[1], x.shape[2], x.shape[3]) #(N/num_img_sup, num_img_sup, C, H, W)
+
+        # repeat images to be processed together until all available superposition channels are used
+        x = x.repeat(1, self.sup_ratio, 1, 1, 1) #(N/num_img_sup, num_img_sup_cap, C, H, W)
+
+        x = self.bind(x)
+        x = torch.sum(x, 1) #(N/num_img_sup, C, H, W)
+
+        # computation in superposition
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+
+        if type(x) == CodebookOutput:
+            return x.map(self.backend)
+        else:
+            return self.backend(x)

@@ -18,6 +18,7 @@ import sys
 import random, numpy
 from math import isfinite
 import tqdm
+from pathlib import Path
 
 # ==================================================================================================
 # FUNCTIONS
@@ -322,6 +323,7 @@ if __name__ == '__main__': # avoids rerunning code when multiple processes are s
                     }
                 if args.checkpointing_path:
                     try:
+                        Path(args.checkpointing_path).mkdir(parents=True, exist_ok=True)
                         torch.save(checkpoint, args.checkpointing_path + identifier_ + '_model.pt')
                     except Exception as e: 
                         print(e)

@@ -1,0 +1,4 @@
+This one is with:
+CE loss of original output
+CE loss of codeboook output
+- entropy loss of latent
