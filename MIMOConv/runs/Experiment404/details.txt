@@ -1,0 +1,3 @@
+I/Q modulator with infinite-resolution constellation
+Constant channel matrix
+Fine-tune head model with PSNR=20

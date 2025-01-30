@@ -19,7 +19,8 @@ import random, numpy
 from math import isfinite
 import tqdm
 from pathlib import Path
-from comm_utils import insert_mimo_channel
+from codebook import Codebook
+from comm_utils import *
 
 # ==================================================================================================
 # FUNCTIONS
@@ -60,7 +61,7 @@ def train_epoch(average_gradient_last_epoch):
 
             # forward pass
             outputs = model(inputs)
-            effective_batch_size = outputs.shape[0] # due to superposition batch may be truncated
+            effective_batch_size = outputs.original_tensor.shape[0] # due to superposition batch may be truncated
             labels_a = labels_a[:effective_batch_size]
             labels_b = labels_b[:effective_batch_size]
 
@@ -70,17 +71,14 @@ def train_epoch(average_gradient_last_epoch):
                 regularization_loss.backward()
                 isometry_regularization_grad_norm_sum += torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1e3) # used to measure norm
 
-            # Backpropagate through only one computation channel
-            # pilot_comp_ch_idx = torch.randint(0, args.num, (1,)).item()
-            # loss = mixup_criterion(criterion,
-            #                        outputs[pilot_comp_ch_idx * args.batch_size:(pilot_comp_ch_idx + 1) * args.batch_size],
-            #                        labels_a[pilot_comp_ch_idx * args.batch_size:(pilot_comp_ch_idx + 1) * args.batch_size],
-            #                        labels_b[pilot_comp_ch_idx * args.batch_size:(pilot_comp_ch_idx + 1) * args.batch_size],
-            #                        lambd
-            #                        ) + args.binding_regularization * model.binding_regularization()
+            loss = mixup_criterion(criterion, outputs.original_tensor, labels_a, labels_b, lambd)
+            loss += args.binding_regularization * model.binding_regularization()
+            for codebook_output, dist, codebook in outputs.codebook_outputs:
+                loss += mixup_criterion(criterion, codebook_output, labels_a, labels_b, lambd)
+                # TODO: use + to minize the the communication overhead 
+                # use - to maximize coding redundancy and robustness
+                loss -= torch.distributions.Categorical(dist).entropy().mean(dim=-1).mean().item() * codebook.beta
             
-            # Use all the computation channels for fine-tuning
-            loss = mixup_criterion(criterion, outputs, labels_a, labels_b, lambd) + args.binding_regularization * model.binding_regularization()
             loss.backward()
             # allows at most twice the total gradient average of last epoch. Prevents model divergence by filtering out bad batches.
             # if learning rate is chosen too high and all batches exceed twice the old mean in gradient norm model stops updating
@@ -97,7 +95,7 @@ def train_epoch(average_gradient_last_epoch):
 
             # statistics
             sum_loss += loss.item()
-            _, predicted = torch.max(outputs, 1)
+            _, predicted = torch.max(outputs.codebook_outputs[0][0], 1)
             total += effective_batch_size
             # mixup estimate of correctness: although a superposition is given, it can only estimate a single class, hence reported average will be naturally low
             correct += lambd * (predicted == labels_a).sum().item() + (1 - lambd) * (predicted == labels_b).sum().item()
@@ -126,13 +124,13 @@ def validate_epoch():
                 labels = labels -1
             # calculate outputs by running images through the network
             outputs = model(inputs)
-            effective_batch_size = outputs.shape[0] # due to superposition batch may be truncated
+            effective_batch_size = outputs.original_tensor.shape[0] # due to superposition batch may be truncated
             labels = labels[:effective_batch_size]
-            loss = criterion(outputs, labels)
+            loss = criterion(outputs.codebook_outputs[0][0], labels)
             
             # statistics
             sum_loss += loss.item()
-            _, predicted = torch.max(outputs, 1)
+            _, predicted = torch.max(outputs.codebook_outputs[0][0], 1)
             total += effective_batch_size
             correct += (predicted == labels).sum().item()
         accuracy = 100 * correct / total
@@ -146,7 +144,7 @@ if __name__ == '__main__': # avoids rerunning code when multiple processes are s
     # only -y, -m not used
     parser = argparse.ArgumentParser(description='Trains and evaluates CNNs, in particular demonstrating superposition principles', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('model', type=str, choices=["WideResNet-28", "WideISOReLUNet-28", "WideISONet-28", "MIMONet-28", "WideResNet-16", "WideISOReLUNet-16", 
-                                                    "WideISONet-16", "MIMONet-16", "MIMONet-10", "MIMODistNet-10", "MIMODistNet-16", "MIMODistNet-28"], help='architecture and network depth')
+                                                    "WideISONet-16", "MIMONet-16", "MIMONet-10", "DiscreteMIMODistNet-10", "DiscreteMIMODistNet-16", "DiscreteMIMODistNet-28"], help='architecture and network depth')
     parser.add_argument('dataset', type=str, choices=["CIFAR10", "CIFAR100", "MNIST", "SVHN"], help='dataset')
     parser.add_argument("type", type=str, choices=["None", "HRR", "MBAT"], help="binding type")
     parser.add_argument("num", type=int, help="maximum superposition capability of model")
@@ -178,10 +176,10 @@ if __name__ == '__main__': # avoids rerunning code when multiple processes are s
     parser.add_argument('-t', "--transfer_learning_path", type=str, required=True, default=None, help="loads model from checkpoint at path as starting point")
     parser.add_argument('-r', "--random_seed", type=int, default=42, help="allows reproducibility")
 
-    parser.add_argument('--split_layer', type=str, default=None, help="the splitting layer between the head and tail of the distributed DNN")
+    parser.add_argument('--codebook_layer', type=str, default=None, help="the layer name after which the codebook for communication is placed")
+    parser.add_argument('--codebook_size', type=int, default=160, help="the number of embeddings in codebook which determines the modulation order")
+    parser.add_argument('--vib_beta', type=float, default=1e-3, help="the weighting coefficient for variational information bottleneck")
     parser.add_argument('--comm_snr', type=float, default=20, help="the SNR for the additive white Gaussian noise channel")
-    parser.add_argument('--comm_n_streams', type=int, default=8, help="the number of data streams in MIMO communication system")
-    parser.add_argument('--channel_model', type=str, default="awgn", help="the model for the MIMO channel")
 
     args = parser.parse_args()
 
@@ -271,9 +269,9 @@ if __name__ == '__main__': # avoids rerunning code when multiple processes are s
              "WideISONet-28":SuperWideISONet(num_img_sup_cap = args.num, binding_type = args.type, width=args.width, layers= [4, 4, 4], initial_width=args.initial_width, num_classes=num_classes, norm_layer=norm, block=BasicISOBlock, dirac_init=args.dirac_init, relu_parameter=args.relu_parameter_init, skip_init=args.skip_init, trainable_keys = not args.trainable_keys_disabled, input_channels = input_channels),
              "WideISOReLUNet-28":SuperWideISONet(num_img_sup_cap = args.num, binding_type = args.type, width=args.width, layers= [4, 4, 4], initial_width=args.initial_width, num_classes=num_classes, norm_layer=norm, block=BasicBlock, dirac_init=args.dirac_init, relu_parameter=args.relu_parameter_init, skip_init=args.skip_init, trainable_keys = not args.trainable_keys_disabled, input_channels = input_channels),
              "MIMONet-28":SuperWideISONet(num_img_sup_cap = args.num, binding_type = args.type, width=args.width, layers= [4, 4, 4], initial_width=args.initial_width, num_classes=num_classes, norm_layer=norm, block=AdjustedISOBlock, dirac_init=args.dirac_init, relu_parameter=args.relu_parameter_init, skip_init=args.skip_init, trainable_keys = not args.trainable_keys_disabled, input_channels = input_channels),
-             "MIMODistNet-10":SuperWideISONet(num_img_sup_cap = args.num, binding_type = args.type, width=args.width, layers= [1, 1, 1], initial_width=args.initial_width, num_classes=num_classes, norm_layer=norm, block=AdjustedISOBlock, dirac_init=args.dirac_init, relu_parameter=args.relu_parameter_init, skip_init=args.skip_init, trainable_keys = not args.trainable_keys_disabled, input_channels = input_channels),
-             "MIMODistNet-16":SuperWideISONet(num_img_sup_cap = args.num, binding_type = args.type, width=args.width, layers= [2, 2, 2], initial_width=args.initial_width, num_classes=num_classes, norm_layer=norm, block=AdjustedISOBlock, dirac_init=args.dirac_init, relu_parameter=args.relu_parameter_init, skip_init=args.skip_init, trainable_keys = not args.trainable_keys_disabled, input_channels = input_channels),
-             "MIMODistNet-28":SuperWideISONet(num_img_sup_cap = args.num, binding_type = args.type, width=args.width, layers= [4, 4, 4], initial_width=args.initial_width, num_classes=num_classes, norm_layer=norm, block=AdjustedISOBlock, dirac_init=args.dirac_init, relu_parameter=args.relu_parameter_init, skip_init=args.skip_init, trainable_keys = not args.trainable_keys_disabled, input_channels = input_channels)
+             "DiscreteMIMODistNet-10":ModifiedSuperWideISONet(num_img_sup_cap = args.num, binding_type = args.type, width=args.width, layers= [1, 1, 1], initial_width=args.initial_width, num_classes=num_classes, norm_layer=norm, block=ModifiedAdjustedISOBlock, dirac_init=args.dirac_init, relu_parameter=args.relu_parameter_init, skip_init=args.skip_init, trainable_keys = not args.trainable_keys_disabled, input_channels = input_channels),
+             "DiscreteMIMODistNet-16":ModifiedSuperWideISONet(num_img_sup_cap = args.num, binding_type = args.type, width=args.width, layers= [2, 2, 2], initial_width=args.initial_width, num_classes=num_classes, norm_layer=norm, block=ModifiedAdjustedISOBlock, dirac_init=args.dirac_init, relu_parameter=args.relu_parameter_init, skip_init=args.skip_init, trainable_keys = not args.trainable_keys_disabled, input_channels = input_channels),
+             "DiscreteMIMODistNet-28":ModifiedSuperWideISONet(num_img_sup_cap = args.num, binding_type = args.type, width=args.width, layers= [4, 4, 4], initial_width=args.initial_width, num_classes=num_classes, norm_layer=norm, block=ModifiedAdjustedISOBlock, dirac_init=args.dirac_init, relu_parameter=args.relu_parameter_init, skip_init=args.skip_init, trainable_keys = not args.trainable_keys_disabled, input_channels = input_channels)
              }.get(args.model)
     if model == None:
         print(f'unknown argument {args.model} for model')
@@ -303,33 +301,12 @@ if __name__ == '__main__': # avoids rerunning code when multiple processes are s
 
     model = model.to(device)
 
-    if "Dist" in args.model:
-        insert_mimo_channel(model, split_layer=args.split_layer, n_streams=args.comm_n_streams, snr=args.comm_snr, channel_model=args.channel_model)
-        # trainable_params = []
-        # if model.binding_type == "HRR":
-        #     trainable_params.extend(list(model.channelConv.parameters()))
-        # if model.binding_type == "MBAT":
-        #     trainable_params.append(list(model.channelLinear.parameters()))
-        # trainable_params.extend(list(model.unbind.parameters()))
-        # for param in model.parameters():
-        #     if param not in trainable_params:
-        #         param.requires_grad = False
-
-        # Train the binding and unbinding keys only
-        # for param in model.parameters():
-        #     param.requires_grad = False
-        # if model.binding_type == "HRR":
-        #     for param in model.channelConv.parameters():
-        #         param.requires_grad = True
-        # if model.binding_type == "MBAT":
-        #     for param in model.channelLinear.parameters():
-        #         param.requires_grad = True
-        # for param in model.unbind.parameters():
-        #     param.requires_grad = True
+    if args.codebook_layer is not None:
+        insert_codebook(model, trainloader, args.codebook_layer, args.codebook_size, args.vib_beta, args.comm_snr)
 
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = construct_optim(model, weight_decay=args.weight_decay)
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, args.lr, epochs=args.epochs, steps_per_epoch=train_iters*args.num)
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, [args.lr, args.lr / 10.0, args.lr], epochs=args.epochs, steps_per_epoch=train_iters*args.num)
 
     try:
         checkpoint = torch.load(args.checkpointing_path + identifier_ + '_model.pt')
@@ -416,10 +393,6 @@ if __name__ == '__main__': # avoids rerunning code when multiple processes are s
             writer.add_scalar(f'Binding_Regularization', br, epoch)
             writer.add_scalar(f'Isometry_Regularization', ir, epoch)
             writer.flush()
-        
-        if "Dist" in args.model and epoch % 100 == 0:
-            model.get_submodule(f"{args.split_layer}.1").update_channel_matrix()
-            model.get_submodule(f"{args.split_layer}.1").to(device)
 
 
     # in case of dynamic use case log metrics on fewer images.

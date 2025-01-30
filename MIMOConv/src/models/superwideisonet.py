@@ -237,7 +237,7 @@ class SuperWideISONet(SuperWideResnet):
                 count += 1
         return 0 if count == 0 else sum.item() / count
 
-class ModifiedAdjustedISOBloc(AdjustedISOBlock):
+class ModifiedAdjustedISOBlock(AdjustedISOBlock):
     def forward(self, x: Tensor) -> Tensor:
         if type(x) == CodebookOutput:
             return x.map(super().forward)

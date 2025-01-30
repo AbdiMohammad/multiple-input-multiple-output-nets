@@ -1,10 +1,13 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 import sklearn
 import sklearn.cluster
 
 from codebook import Codebook
+
+from mimo_comm import MIMOChannel
 
 class StopCompute(nn.Module):
     def __init__(self, inner):
@@ -62,3 +65,16 @@ def insert_codebook(model, dataloader, module, n_embeddings, beta, snr):
         )
     
     exec(f"model.{module} = new_module")
+
+def insert_mimo_channel(model, split_layer, n_streams, snr, channel_model):
+    target_module = eval(f"model.{split_layer}")
+
+    channel = MIMOChannel(n_streams, snr, model=channel_model).to(model_device(model))
+
+    new_module = nn.Sequential(
+        target_module,
+        # nn.Tanh(),
+        channel
+    )
+
+    exec(f"model.{split_layer} = new_module")
