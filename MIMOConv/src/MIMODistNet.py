@@ -418,7 +418,7 @@ if __name__ == '__main__': # avoids rerunning code when multiple processes are s
             writer.flush()
         
         if "Dist" in args.model and epoch % 100 == 0:
-            model.get_submodule(f"{args.split_layer}.1").update_channel_matrix()
+            model.get_submodule(f"{args.split_layer}.1").randomize_channel_matrix()
             model.get_submodule(f"{args.split_layer}.1").to(device)
 
 

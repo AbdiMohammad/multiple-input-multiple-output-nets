@@ -78,3 +78,5 @@ def insert_mimo_channel(model, split_layer, n_streams, snr, channel_model):
     )
 
     exec(f"model.{split_layer} = new_module")
+
+# def insert_precoder()
