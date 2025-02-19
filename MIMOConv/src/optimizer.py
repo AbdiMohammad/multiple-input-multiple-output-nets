@@ -10,6 +10,7 @@ from torch.optim import SGD
 from models.superwideisonet import SReLU 
 from torch.nn import PReLU
 from codebook import Codebook
+from mimo_comm import MIMOPrecoder
 
 # ==================================================================================================
 # FUNCTIONS
@@ -24,12 +25,15 @@ def construct_optim(net, weight_decay:float):
     """
     relu_params = []
     codebook_params = []
+    precoder_params = []
     other_params = []
     for m in net.modules():
         if isinstance(m, SReLU) or isinstance(m, PReLU):
             relu_params.extend(m.parameters(recurse=False))
         elif isinstance(m, Codebook):
             codebook_params.extend(m.parameters(recurse=False))
+        elif isinstance(m, MIMOPrecoder):
+            precoder_params.extend(m.parameters(recurse=False))
         else:
             other_params.extend(m.parameters(recurse=False))
 
@@ -43,15 +47,20 @@ def construct_optim(net, weight_decay:float):
             'weight_decay': weight_decay,
         },
         {
+            'params': precoder_params,
+            'lr': 0.001,
+            'weight_decay': weight_decay,
+        },
+        {
             'params': other_params,
             'weight_decay': weight_decay,
         }
     ]
 
     # Check all parameters are accounted for.
-    assert len(list(net.parameters())) == len(other_params) + len(relu_params) + len(codebook_params), \
+    assert len(list(net.parameters())) == len(other_params) + len(relu_params) + len(codebook_params) + len(precoder_params), \
         f'parameter size does not match: ' \
-        f'{len(other_params)} + {len(relu_params)} + {len(codebook_params)} != ' \
+        f'{len(other_params)} + {len(relu_params)} + {len(codebook_params)} + {len(precoder_params)} != ' \
         f'{len(list(net.parameters()))}'
 
     return SGD(

@@ -7,7 +7,7 @@ import sklearn.cluster
 
 from codebook import Codebook
 
-from mimo_comm import MIMOChannel
+import mimo_comm
 
 class StopCompute(nn.Module):
     def __init__(self, inner):
@@ -66,14 +66,23 @@ def insert_codebook(model, dataloader, module, n_embeddings, beta, snr):
     
     exec(f"model.{module} = new_module")
 
-def insert_mimo_channel(model, split_layer, n_streams, snr, channel_model):
+def insert_mimo_channel(model, split_layer, n_streams, snr, channel_model, batch_size):
     target_module = eval(f"model.{split_layer}")
 
-    channel = MIMOChannel(n_streams, snr, model=channel_model).to(model_device(model))
+    channel = mimo_comm.MIMOChannel(batch_size, n_streams, snr, model=channel_model).to(model_device(model))
+    
+    # latent_shape = get_module_output_shape(model, dataloader, split_layer)
+    precoder = mimo_comm.MIMOPrecoder(n_streams).to(model_device(model))
+    precoder.set_channel_matrix(channel.channel_matrix)
+    
+    # Loading the pinv equivalent weights
+    # precoder.load_state_dict(torch.load("results/reconst_precode.pth"))
+    # channel.set_channel_matrix(precoder.channel_matrix)
 
     new_module = nn.Sequential(
         target_module,
         # nn.Tanh(),
+        precoder,
         channel
     )
 

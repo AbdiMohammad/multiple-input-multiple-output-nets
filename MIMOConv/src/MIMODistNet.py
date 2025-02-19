@@ -42,7 +42,9 @@ def train_epoch(average_gradient_last_epoch):
     # set a standard value if validation changed it
     model.num_img_sup = args.num 
     for _ in range(args.num): # batch size scales proportionally with args.num. Must correct for fewer updates to be fair.
-        for inputs, labels in trainloader: 
+        for inputs, labels in trainloader:
+            if inputs.shape[0] != args.batch_size * args.num:
+                continue
             if args.sup_frequency < 1:
                 if torch.rand(1) > args.sup_frequency:
                     model.num_img_sup = sup_low # batch size in bulk of the model after binding increases by factor args.num / sup_low
@@ -59,12 +61,25 @@ def train_epoch(average_gradient_last_epoch):
             optimizer.zero_grad()
 
             # forward pass
+            # Make the MIMO Precoder trainable for the reconstuction loss update
+            # model.get_submodule(f"{args.split_layer}.1").requires_grad_(True)
             outputs = model(inputs)
             effective_batch_size = outputs.shape[0] # due to superposition batch may be truncated
             labels_a = labels_a[:effective_batch_size]
             labels_b = labels_b[:effective_batch_size]
 
             # backward pass
+            # reconst_criterion = torch.nn.MSELoss()
+            # loss = reconst_criterion(torch.view_as_real(model.get_submodule(f"{args.split_layer}.1").precoding_tensor),
+            #                                  torch.view_as_real(torch.linalg.pinv(model.get_submodule(f"{args.split_layer}.1").channel_matrix))
+            #                                  )
+            # loss.backward(retain_graph=True)
+            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm= 1e3)
+            # optimizer.step()
+            # optimizer.zero_grad()
+            # Make the MIMO Precoder non-trainable to exclude it from the task-oriented loss
+            # model.get_submodule(f"{args.split_layer}.1").requires_grad_(False)
+
             regularization_loss = args.orthogonal_regularization * model.isometry_regularization(device)
             if regularization_loss != 0: # WideResNet has no regularization loss
                 regularization_loss.backward()
@@ -105,7 +120,7 @@ def train_epoch(average_gradient_last_epoch):
     accuracy = 100 * correct / total
     loss = sum_loss / (total / effective_batch_size)
 
-    return loss, accuracy, (isometry_regularization_grad_norm_sum / finite_gradient_count if finite_gradient_count > 0 else -1), (total_grad_norm_sum / finite_gradient_count if finite_gradient_count > 0 else average_gradient_last_epoch), (non_finite_gradient_count / (non_finite_gradient_count + finite_gradient_count))
+    return loss, accuracy, (isometry_regularization_grad_norm_sum / finite_gradient_count if finite_gradient_count > 0 else -1), (total_grad_norm_sum / finite_gradient_count if finite_gradient_count > 0 else average_gradient_last_epoch), (non_finite_gradient_count / (non_finite_gradient_count + finite_gradient_count) if (non_finite_gradient_count + finite_gradient_count) > 0 else -1)
 
 def validate_epoch():
     r"""validates model at a given epoch
@@ -118,6 +133,8 @@ def validate_epoch():
 
     with torch.no_grad():
         for inputs, labels in evalloader:
+            if inputs.shape[0] != args.num * args.batch_size:
+                continue
             # transfer data to GPU
             inputs = inputs.to(device)
             labels = labels.to(device)
@@ -304,7 +321,13 @@ if __name__ == '__main__': # avoids rerunning code when multiple processes are s
     model = model.to(device)
 
     if "Dist" in args.model:
-        insert_mimo_channel(model, split_layer=args.split_layer, n_streams=args.comm_n_streams, snr=args.comm_snr, channel_model=args.channel_model)
+        insert_mimo_channel(model, split_layer=args.split_layer, n_streams=args.comm_n_streams, snr=args.comm_snr, channel_model=args.channel_model, batch_size=args.batch_size)
+        
+        # Only fine-tune the MIMO precoding module
+        # for param in model.parameters():
+        #     param.requires_grad = False
+        # model.get_submodule(f"{args.split_layer}.1").requires_grad_(True)
+        
         # trainable_params = []
         # if model.binding_type == "HRR":
         #     trainable_params.extend(list(model.channelConv.parameters()))
@@ -417,8 +440,10 @@ if __name__ == '__main__': # avoids rerunning code when multiple processes are s
             writer.add_scalar(f'Isometry_Regularization', ir, epoch)
             writer.flush()
         
-        if "Dist" in args.model and epoch % 100 == 0:
-            model.get_submodule(f"{args.split_layer}.1").randomize_channel_matrix()
+        if "Dist" in args.model:
+            model.get_submodule(f"{args.split_layer}.2").update_channel_matrix()
+            model.get_submodule(f"{args.split_layer}.2").to(device)
+            model.get_submodule(f"{args.split_layer}.1").set_channel_matrix(model.get_submodule(f"{args.split_layer}.2").channel_matrix)
             model.get_submodule(f"{args.split_layer}.1").to(device)
 
 
