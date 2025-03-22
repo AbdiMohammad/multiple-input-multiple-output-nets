@@ -26,7 +26,7 @@ class SendOverChannel(torch.autograd.Function):
             return grad_input, None, None
 
 class MIMOChannel(nn.Module):
-    def __init__(self, batch_size, n_streams, PSNR=20.0, model="rayleigh") -> None:
+    def __init__(self, batch_size, n_streams, model="rayleigh", PSNR=20.0) -> None:
         super().__init__()
         self.batch_size = batch_size
         self.N_S = n_streams
@@ -95,13 +95,15 @@ class MIMOChannel(nn.Module):
             return x
 
 class MIMOPrecoder(nn.Module):
-    def __init__(self, n_streams, n_carriers=1) -> None:
+    def __init__(self, n_streams, type="task-oriented") -> None:
         super().__init__()
         self.N_S = n_streams
         self.register_buffer('channel_matrix', None)
-        self.linear_weight1 = nn.Parameter(torch.eye(self.N_S * self.N_S, self.N_S * self.N_S, dtype=torch.complex64))
-        self.linear_weight2 = nn.Parameter(torch.eye(self.N_S * self.N_S, self.N_S * self.N_S, dtype=torch.complex64))
-        self.relu = nn.ReLU()
+        self.type = type
+        assert self.type in ["task-oriented", "SVD", "ZF", "LMMSE", "MCR2"]
+        if self.type == "task-oriented":
+            self.linear_weight1 = nn.Parameter(torch.eye(self.N_S * self.N_S, self.N_S * self.N_S, dtype=torch.complex64))
+            # self.relu = nn.ReLU()
         
     def set_channel_matrix(self, channel_matrix):
         self.channel_matrix = channel_matrix
@@ -110,9 +112,55 @@ class MIMOPrecoder(nn.Module):
         # self.precoding_tensor = torch.view_as_complex(self.relu(torch.view_as_real(torch.matmul(torch.linalg.pinv(self.channel_matrix).flatten(1), self.linear_weight1.T))))
         # self.precoding_tensor = torch.view_as_complex(self.relu(torch.view_as_real(torch.matmul(self.precoding_tensor, self.linear_weight2.T)))).reshape(self.channel_matrix.shape)
         # Only linear layer without any activation function
-        self.precoding_tensor = torch.matmul(torch.linalg.pinv(self.channel_matrix).flatten(1), self.linear_weight1.T)
-        self.precoding_tensor = torch.matmul(self.precoding_tensor, self.linear_weight2.T).reshape(self.channel_matrix.shape)
-        # self.precoding_tensor = self.precoding_tensor.unsqueeze(-1).unsqueeze(-1)
+        if self.type == "task-oriented":
+            self.precoding_tensor = torch.matmul(torch.linalg.svd(self.channel_matrix)[2].conj().mT.flatten(1), self.linear_weight1.T).reshape(self.channel_matrix.shape)
+            # self.precoding_tensor = torch.matmul(self.precoding_tensor, self.linear_weight2.T)
+            # self.precoding_tensor = self.precoding_tensor.unsqueeze(-1).unsqueeze(-1)
+        elif self.type == "SVD":
+            self.precoding_tensor = torch.linalg.svd(self.channel_matrix)[2].conj().mT
+        elif self.type == "ZF":
+            self.precoding_tensor = torch.linalg.pinv(self.channel_matrix)
+        
+        original_shape = x.shape
+        x = x.reshape(x.shape[0], self.N_S, -1)
+        x = torch.complex(*x.chunk(2, dim=2))
+        # x = x.unsqueeze(0).unsqueeze(-1)
+        
+        x = torch.matmul(self.precoding_tensor, x)
+        # x = F.conv2d(x, self.precoding_tensor)
+        # x = x.squeeze(0).squeeze(-1)
+        
+        # x = torch.matmul(torch.linalg.pinv(self.channel_matrix), x)
+        
+        x = torch.cat((x.real, x.imag), dim=2)
+        x = x.reshape(original_shape)
+
+        return x
+
+class MIMOCombiner(nn.Module):
+    def __init__(self, n_streams, type="task-oriented") -> None:
+        super().__init__()
+        self.N_S = n_streams
+        self.register_buffer('channel_matrix', None)
+        self.type = type
+        assert self.type in ["task-oriented", "SVD", "ZF", "LMMSE", "MCR2"]
+        if self.type == "task-oriented":
+            self.linear_weight1 = nn.Parameter(torch.eye(self.N_S * self.N_S, self.N_S * self.N_S, dtype=torch.complex64))
+        
+    def set_channel_matrix(self, channel_matrix):
+        self.channel_matrix = channel_matrix
+    
+    def forward(self, x):
+        # self.precoding_tensor = torch.view_as_complex(self.relu(torch.view_as_real(torch.matmul(torch.linalg.pinv(self.channel_matrix).flatten(1), self.linear_weight1.T))))
+        # self.precoding_tensor = torch.view_as_complex(self.relu(torch.view_as_real(torch.matmul(self.precoding_tensor, self.linear_weight2.T)))).reshape(self.channel_matrix.shape)
+        # Only linear layer without any activation function
+        if self.type == "task-oriented":
+            self.precoding_tensor = torch.matmul(torch.linalg.svd(self.channel_matrix)[0].conj().mT.flatten(1), self.linear_weight1.T).reshape(self.channel_matrix.shape)
+            # self.precoding_tensor = self.precoding_tensor.unsqueeze(-1).unsqueeze(-1)
+        elif self.type == "SVD":
+            self.precoding_tensor = torch.linalg.svd(self.channel_matrix)[0].conj().mT
+        elif self.type == "ZF":
+            return x
         
         original_shape = x.shape
         x = x.reshape(x.shape[0], self.N_S, -1)

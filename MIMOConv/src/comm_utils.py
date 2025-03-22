@@ -66,14 +66,17 @@ def insert_codebook(model, dataloader, module, n_embeddings, beta, snr):
     
     exec(f"model.{module} = new_module")
 
-def insert_mimo_channel(model, split_layer, n_streams, snr, channel_model, batch_size):
+def insert_mimo_channel(model, split_layer, n_streams, channel_model, snr, precoder_type, batch_size):
     target_module = eval(f"model.{split_layer}")
 
-    channel = mimo_comm.MIMOChannel(batch_size, n_streams, snr, model=channel_model).to(model_device(model))
+    channel = mimo_comm.MIMOChannel(batch_size, n_streams=n_streams, model=channel_model, PSNR=snr).to(model_device(model))
     
     # latent_shape = get_module_output_shape(model, dataloader, split_layer)
-    precoder = mimo_comm.MIMOPrecoder(n_streams).to(model_device(model))
+    precoder = mimo_comm.MIMOPrecoder(n_streams=n_streams, type=precoder_type).to(model_device(model))
     precoder.set_channel_matrix(channel.channel_matrix)
+
+    combiner = mimo_comm.MIMOCombiner(n_streams=n_streams, type=precoder_type).to(model_device(model))
+    combiner.set_channel_matrix(channel.channel_matrix)
     
     # Loading the pinv equivalent weights
     # precoder.load_state_dict(torch.load("results/reconst_precode.pth"))
@@ -83,7 +86,8 @@ def insert_mimo_channel(model, split_layer, n_streams, snr, channel_model, batch
         target_module,
         # nn.Tanh(),
         precoder,
-        channel
+        channel,
+        combiner
     )
 
     exec(f"model.{split_layer} = new_module")

@@ -196,9 +196,10 @@ if __name__ == '__main__': # avoids rerunning code when multiple processes are s
     parser.add_argument('-r', "--random_seed", type=int, default=42, help="allows reproducibility")
 
     parser.add_argument('--split_layer', type=str, default=None, help="the splitting layer between the head and tail of the distributed DNN")
-    parser.add_argument('--comm_snr', type=float, default=20, help="the SNR for the additive white Gaussian noise channel")
     parser.add_argument('--comm_n_streams', type=int, default=8, help="the number of data streams in MIMO communication system")
-    parser.add_argument('--channel_model', type=str, default="awgn", help="the model for the MIMO channel")
+    parser.add_argument('--channel_model', type=str, default="awgn", help="the model for the MIMO communication channel")
+    parser.add_argument('--comm_snr', type=float, default=20, help="the SNR for the additive white Gaussian noise communication channel used for training")
+    parser.add_argument('--precoder_type', type=str, default="task-oriented", help="the MIMO communication precoding technique")
 
     args = parser.parse_args()
 
@@ -321,7 +322,7 @@ if __name__ == '__main__': # avoids rerunning code when multiple processes are s
     model = model.to(device)
 
     if "Dist" in args.model:
-        insert_mimo_channel(model, split_layer=args.split_layer, n_streams=args.comm_n_streams, snr=args.comm_snr, channel_model=args.channel_model, batch_size=args.batch_size)
+        insert_mimo_channel(model, split_layer=args.split_layer, n_streams=args.comm_n_streams, channel_model=args.channel_model, snr=args.comm_snr, precoder_type=args.precoder_type, batch_size=args.batch_size)
         
         # Only fine-tune the MIMO precoding module
         # for param in model.parameters():
@@ -445,7 +446,8 @@ if __name__ == '__main__': # avoids rerunning code when multiple processes are s
             model.get_submodule(f"{args.split_layer}.2").to(device)
             model.get_submodule(f"{args.split_layer}.1").set_channel_matrix(model.get_submodule(f"{args.split_layer}.2").channel_matrix)
             model.get_submodule(f"{args.split_layer}.1").to(device)
-
+            model.get_submodule(f"{args.split_layer}.3").set_channel_matrix(model.get_submodule(f"{args.split_layer}.2").channel_matrix)
+            model.get_submodule(f"{args.split_layer}.3").to(device)
 
     # in case of dynamic use case log metrics on fewer images.
     metric_dict = {
